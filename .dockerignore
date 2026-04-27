@@ -1,0 +1,6 @@
+.git
+.cursor
+*.exe
+**/_*.json
+.env
+.env.*
