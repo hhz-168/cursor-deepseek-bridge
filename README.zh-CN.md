@@ -1,5 +1,7 @@
 # cursor-deepseek-bridge
 
+[English](./README.md)
+
 一个轻量级 Go 代理，让 [Cursor](https://cursor.com) 通过 OpenAI 兼容接口使用 [DeepSeek V4 Pro](https://platform.deepseek.com) 模型。
 
 ## 为什么需要这个代理

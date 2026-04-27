@@ -1,5 +1,7 @@
 # cursor-deepseek-bridge
 
+[简体中文](./README.zh-CN.md)
+
 A lightweight Go proxy that enables [Cursor](https://cursor.com) to use [DeepSeek V4 Pro](https://platform.deepseek.com) through an OpenAI-compatible endpoint.
 
 ## Why This Proxy Exists
