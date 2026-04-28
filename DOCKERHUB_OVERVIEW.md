@@ -1,6 +1,8 @@
 # cursor-deepseek-bridge
 
-A lightweight Go proxy that enables [Cursor](https://cursor.com) to use DeepSeek models via an OpenAI-compatible API.
+A lightweight Go proxy that enables [Cursor](https://cursor.com) to use DeepSeek V4 models (Pro / Flash) via an OpenAI-compatible API.
+
+> **Highlight: Zero-config Thinking toggle.** Just append `-thinking` to any model name (e.g. `deepseek-v4-pro-thinking`) in Cursor, and the proxy automatically enables reasoning, bridges `reasoning_content` across multi-turn conversations, and caches it transparently. No restarts, no config changes — mix thinking and non-thinking models freely in the same session.
 
 ## Why this image exists
 
@@ -13,6 +15,8 @@ This proxy fixes that compatibility issue by forcing `thinking=disabled` by defa
 
 - OpenAI-compatible `/v1` endpoint for Cursor
 - Fixes DeepSeek V4 Pro multi-turn compatibility issues
+- Per-request Thinking mode: use `-thinking` suffixed model names to enable reasoning for specific conversations
+- Automatically bridges `reasoning_content` across turns when Thinking mode is active (non-streaming)
 - Transparently forwards your own DeepSeek API key — no server-side keys needed
 - Lightweight multi-stage Docker image
 - Customizable upstream, model mapping
@@ -39,8 +43,8 @@ docker run -d \
 - `LISTEN` - Listen address (default: `:8080`)
 - `MAPPED_MODEL` - Default mapped model alias target
 - `MODEL_MAP` - Extra custom model mappings
-- `DS_THINKING` - Set `enabled` to turn Thinking on
-- `DS_REASONING_EFFORT` - `low | medium | high`
+- `DS_REASONING_EFFORT` - Reasoning effort for `-thinking` suffix models (`low | medium | high`)
+- `DS_CACHE_TTL` - Reasoning cache TTL (default: `24h`)
 
 ## Security Notes
 

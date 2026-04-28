@@ -5,9 +5,9 @@ services:
       - "8080:8080"
     environment:
       UPSTREAM: ${UPSTREAM:-https://api.deepseek.com}
+      LISTEN: ${LISTEN:-:8080}
       MAPPED_MODEL: ${MAPPED_MODEL:-}
-      DS_V4_PRO_DEFAULTS: ${DS_V4_PRO_DEFAULTS:-}
-      DS_THINKING: ${DS_THINKING:-}
       DS_REASONING_EFFORT: ${DS_REASONING_EFFORT:-}
+      DS_CACHE_TTL: ${DS_CACHE_TTL:-24h}
       MODEL_MAP: ${MODEL_MAP:-}
     restart: unless-stopped

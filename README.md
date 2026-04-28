@@ -2,7 +2,9 @@
 
 [简体中文](./README.zh-CN.md)
 
-A lightweight Go proxy that enables [Cursor](https://cursor.com) to use [DeepSeek V4 Pro](https://platform.deepseek.com) through an OpenAI-compatible endpoint.
+A lightweight Go proxy that enables [Cursor](https://cursor.com) to use [DeepSeek V4](https://platform.deepseek.com) models (Pro / Flash) through an OpenAI-compatible endpoint.
+
+> **Highlight: Zero-config Thinking toggle.** Just append `-thinking` to any model name (e.g. `deepseek-v4-pro-thinking`) in Cursor, and the proxy automatically enables reasoning, bridges `reasoning_content` across multi-turn conversations, and caches it transparently. No restarts, no config changes — mix thinking and non-thinking models freely in the same session.
 
 ## Why This Proxy Exists
 
@@ -87,7 +89,8 @@ In Cursor, set the following:
 
 - **OpenAI Base URL**: `https://your-public-url/v1` (the trailing `/v1` is required)
 - **API Key**: Your DeepSeek API key from step 1
-- **Model**: Choose `deepseek-v4-pro` (or your custom mapped model name)
+- **Model**: Choose `deepseek-v4-pro` or `deepseek-v4-flash` (or your custom mapped model name)
+  - Append `-thinking` to the model name (e.g. `deepseek-v4-pro-thinking` / `deepseek-v4-flash-thinking`) to enable reasoning for that conversation. Mix thinking and non-thinking models freely in the same session — no proxy restart needed.
 
 ## Configuration Reference
 
@@ -98,6 +101,9 @@ In Cursor, set the following:
 | `UPSTREAM` | No | `https://api.deepseek.com` | Upstream API endpoint |
 | `LISTEN` | No | `:8080` | Proxy listen address |
 | `MAPPED_MODEL` | No | `deepseek-v4-pro` | Default target for all unrecognized model names |
+| `DS_REASONING_EFFORT` | No | `high` | Reasoning effort when using `-thinking` suffixed models (`low` / `medium` / `high`) |
+| `DS_CACHE_TTL` | No | `24h` | TTL for reasoning content hash cache (used by `-thinking` suffixed models to bridge `reasoning_content` across turns) |
+| `DS_QUEUE_TTL` | No | `24h` | TTL for per-conversation order queue; idle queues are cleaned after this duration |
 
 ### Model Mapping
 
@@ -108,6 +114,13 @@ The proxy automatically maps common OpenAI model names used in Cursor to DeepSee
 - `gpt-4` / `gpt-4-turbo` → `deepseek-v4-pro`
 - `gpt-3.5-turbo` → `deepseek-v4-pro`
 - `chatgpt-4o-latest` → `deepseek-v4-pro`
+
+DeepSeek models pass through directly, including their `-thinking` variants:
+
+- `deepseek-v4-pro` → `deepseek-v4-pro` (thinking disabled)
+- `deepseek-v4-pro-thinking` → `deepseek-v4-pro` (thinking enabled)
+- `deepseek-v4-flash` → `deepseek-v4-flash` (thinking disabled)
+- `deepseek-v4-flash-thinking` → `deepseek-v4-flash` (thinking enabled)
 
 Custom mappings can be configured via environment variables:
 
@@ -121,15 +134,23 @@ export MODEL_MAP=claude-3-opus=deepseek-v4-pro,gpt-4o=deepseek-v4-flash
 
 ### Thinking Mode
 
-DeepSeek V4 has Thinking mode enabled by default, but Cursor does not echo `reasoning_content` in multi-turn conversations, which can cause errors. The proxy therefore sets thinking to `disabled` by default.
+DeepSeek V4 has Thinking mode enabled by default, but Cursor does not echo `reasoning_content` in multi-turn conversations, which can cause errors. The proxy therefore sets `thinking` to `disabled` by default for all requests.
 
-To enable it:
+To use DeepSeek's reasoning capabilities, select a model with the **`-thinking` suffix** in Cursor (e.g., `deepseek-v4-flash-thinking` instead of `deepseek-v4-flash`). The proxy will:
+
+- Enable `thinking` only for that specific request
+- Automatically bridge `reasoning_content` across multi-turn conversations by caching the reasoning from each assistant response and injecting it back into the next request's message history
+
+This per-request approach lets you freely mix thinking and non-thinking models in the same Cursor session without restarting the proxy.
 
 ```bash
-export DS_THINKING=enabled
 # Optional: set reasoning effort level (low / medium / high)
 export DS_REASONING_EFFORT=high
+# Optional: cache TTL for bridging reasoning_content across turns (default: 24h)
+export DS_CACHE_TTL=1h
 ```
+
+> **Note**: Currently only non-streaming (JSON) responses are supported for reasoning caching. Streaming responses will be supported in a future update.
 
 ## Health Check
 

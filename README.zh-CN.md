@@ -2,7 +2,9 @@
 
 [English](./README.md)
 
-一个轻量级 Go 代理，让 [Cursor](https://cursor.com) 通过 OpenAI 兼容接口使用 [DeepSeek V4 Pro](https://platform.deepseek.com) 模型。
+一个轻量级 Go 代理，让 [Cursor](https://cursor.com) 通过 OpenAI 兼容接口使用 [DeepSeek V4](https://platform.deepseek.com) 模型（Pro / Flash）。
+
+> **亮点：零配置 Thinking 开关。** 在 Cursor 中，只需在模型名后加上 `-thinking` 后缀（如 `deepseek-v4-pro-thinking`），代理就会自动开启推理模式，并在多轮对话间透明桥接 `reasoning_content`，自动缓存。无需重启、无需改配置——在同一会话中自由混用 thinking 和非 thinking 模型。
 
 ## 为什么需要这个代理
 
@@ -87,7 +89,8 @@ server {
 
 - **OpenAI Base URL**：`https://你的公网地址/v1`（注意结尾必须有 `/v1`）
 - **API Key**：填写你在 DeepSeek 平台申请的 API Key
-- **Model**：选择 `deepseek-v4-pro`（或你自定义映射的模型名）
+- **Model**：选择 `deepseek-v4-pro` 或 `deepseek-v4-flash`（或你自定义映射的模型名）
+  - 在模型名后加 `-thinking` 后缀（如 `deepseek-v4-pro-thinking` / `deepseek-v4-flash-thinking`）即可对该对话启用推理。同一会话中可自由混用 thinking 和非 thinking 模型，无需重启代理。
 
 ## 配置说明
 
@@ -98,6 +101,9 @@ server {
 | `UPSTREAM` | 否 | `https://api.deepseek.com` | 上游 API 地址 |
 | `LISTEN` | 否 | `:8080` | 代理监听地址 |
 | `MAPPED_MODEL` | 否 | `deepseek-v4-pro` | 所有未知模型名的默认映射目标 |
+| `DS_REASONING_EFFORT` | 否 | `high` | 使用 `-thinking` 后缀模型时的推理深度（`low` / `medium` / `high`） |
+| `DS_CACHE_TTL` | 否 | `24h` | reasoning 内容哈希缓存过期时间（用于 `-thinking` 后缀模型跨轮桥接 `reasoning_content`） |
+| `DS_QUEUE_TTL` | 否 | `24h` | 对话顺序队列过期时间，空闲超时的对话队列会被自动清理 |
 
 ### 模型映射
 
@@ -108,6 +114,13 @@ server {
 - `gpt-4` / `gpt-4-turbo` → `deepseek-v4-pro`
 - `gpt-3.5-turbo` → `deepseek-v4-pro`
 - `chatgpt-4o-latest` → `deepseek-v4-pro`
+
+DeepSeek 原生模型直接透传，包括 `-thinking` 变体：
+
+- `deepseek-v4-pro` → `deepseek-v4-pro`（thinking 禁用）
+- `deepseek-v4-pro-thinking` → `deepseek-v4-pro`（thinking 启用）
+- `deepseek-v4-flash` → `deepseek-v4-flash`（thinking 禁用）
+- `deepseek-v4-flash-thinking` → `deepseek-v4-flash`（thinking 启用）
 
 可通过环境变量自定义：
 
@@ -121,15 +134,23 @@ export MODEL_MAP=claude-3-opus=deepseek-v4-pro,gpt-4o=deepseek-v4-flash
 
 ### Thinking 模式
 
-DeepSeek V4 默认开启 Thinking 模式，但 Cursor 在多轮对话中不会回传 `reasoning_content`，可能导致异常。因此代理默认将 thinking 设为 `disabled`。
+DeepSeek V4 默认开启 Thinking 模式，但 Cursor 在多轮对话中不会回传 `reasoning_content`，可能导致异常。因此代理默认将 `thinking` 设为 `disabled`。
 
-如需开启：
+如需使用 DeepSeek 的推理能力，在 Cursor 中选择带有 **`-thinking` 后缀**的模型（例如使用 `deepseek-v4-flash-thinking` 替代 `deepseek-v4-flash`）。代理会：
+
+- 仅对该请求启用 `thinking`
+- 自动在多轮对话中桥接 `reasoning_content`：缓存每个 assistant 回复中的推理内容，并在下一次请求的消息历史中自动补回
+
+这种按请求控制的方式让你可以在同一个 Cursor 会话中自由混用 thinking 和非 thinking 模型，无需重启代理。
 
 ```bash
-export DS_THINKING=enabled
 # 可选：设置推理深度（low / medium / high）
 export DS_REASONING_EFFORT=high
+# 可选：设置 reasoning 缓存过期时间（默认 24h）
+export DS_CACHE_TTL=24h
 ```
+
+> **注意**：目前仅非流式（JSON）响应支持 reasoning 缓存，流式响应将在后续更新中支持。
 
 ## 健康检查
 
