@@ -4,10 +4,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
       UPSTREAM: ${UPSTREAM:-https://api.deepseek.com}
       MAPPED_MODEL: ${MAPPED_MODEL:-}
-      PROXY_API_KEY: ${PROXY_API_KEY:-}
       DS_V4_PRO_DEFAULTS: ${DS_V4_PRO_DEFAULTS:-}
       DS_THINKING: ${DS_THINKING:-}
       DS_REASONING_EFFORT: ${DS_REASONING_EFFORT:-}

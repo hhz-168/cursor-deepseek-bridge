@@ -18,16 +18,6 @@ import (
 const defaultUpstream = "https://api.deepseek.com"
 
 func main() {
-	deepseekKey := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
-	if len(os.Args) > 1 {
-		if k := strings.TrimSpace(os.Args[1]); k != "" {
-			deepseekKey = k
-		}
-	}
-	if deepseekKey == "" {
-		log.Fatal("need DeepSeek API key: set DEEPSEEK_API_KEY or run: go run main.go <key>")
-	}
-
 	upstreamRaw := strings.TrimSpace(os.Getenv("UPSTREAM"))
 	if upstreamRaw == "" {
 		upstreamRaw = defaultUpstream
@@ -41,8 +31,6 @@ func main() {
 	if listen == "" {
 		listen = ":8080"
 	}
-
-	proxyAPIKey := strings.TrimSpace(os.Getenv("PROXY_API_KEY"))
 
 	modelMap := buildModelMap()
 	dsChatOpts := loadDeepSeekChatOptions()
@@ -62,8 +50,6 @@ func main() {
 		req.Host = upstream.Host
 		req.URL.Host = upstream.Host
 		req.URL.Scheme = upstream.Scheme
-		req.Header.Set("Authorization", "Bearer "+deepseekKey)
-		// 避免把客戶端帶來的舊 Authorization 傳給上游（已由上一行覆蓋）
 		req.Header.Del("Accept-Encoding")
 	}
 
@@ -74,10 +60,6 @@ func main() {
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		withCORS(w, r, func() {
-			if proxyAPIKey != "" && !checkProxyAuth(r, proxyAPIKey) {
-				jsonErr(w, http.StatusUnauthorized, "invalid or missing proxy API key")
-				return
-			}
 			path := r.URL.Path
 			if r.Method == http.MethodPost && path == "/v1/chat/completions" {
 				if err := rewriteChatCompletionBody(r, modelMap, dsChatOpts); err != nil {
@@ -264,16 +246,6 @@ func rewriteChatCompletionBody(r *http.Request, modelMap map[string]string, opts
 	r.Header.Set("Content-Length", strconv.Itoa(len(out)))
 	r.Header.Del("Transfer-Encoding")
 	return nil
-}
-
-func checkProxyAuth(r *http.Request, want string) bool {
-	h := r.Header.Get("Authorization")
-	const p = "Bearer "
-	if !strings.HasPrefix(h, p) {
-		return false
-	}
-	got := strings.TrimSpace(strings.TrimPrefix(h, p))
-	return got == want
 }
 
 func jsonErr(w http.ResponseWriter, status int, msg string) {

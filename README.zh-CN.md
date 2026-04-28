@@ -18,25 +18,31 @@
 
 ### 1. 获取 DeepSeek API Key
 
-前往 [DeepSeek 平台](https://platform.deepseek.com) 注册并获取 API Key。
+前往 [DeepSeek 平台](https://platform.deepseek.com) 注册并获取 API Key。此 Key 将在 Cursor 中配置——代理会透明地将你的 Key 转发给 DeepSeek API。
 
 ### 2. 启动代理
 
 **方式一：直接运行**
 
 ```bash
-export DEEPSEEK_API_KEY=sk-你的key
 go run main.go
 ```
 
 **方式二：Docker Compose**
 
 ```bash
-# 创建 .env 文件
-echo "DEEPSEEK_API_KEY=sk-你的key" > .env
-
-# 启动
 docker compose up -d --build
+```
+
+**方式三：直接从 Docker Hub 拉取**
+
+镜像地址：[houzingm/cursor-deepseek-bridge](https://hub.docker.com/r/houzingm/cursor-deepseek-bridge)
+
+```bash
+docker run -d \
+  --name cursor-deepseek-bridge \
+  -p 8080:8080 \
+  houzingm/cursor-deepseek-bridge:latest
 ```
 
 代理默认监听 `0.0.0.0:8080`。
@@ -80,7 +86,7 @@ server {
 在 Cursor 中进行以下设置：
 
 - **OpenAI Base URL**：`https://你的公网地址/v1`（注意结尾必须有 `/v1`）
-- **API Key**：如果设置了 `PROXY_API_KEY`，填写该值；否则可为任意非空字符串
+- **API Key**：填写你在 DeepSeek 平台申请的 API Key
 - **Model**：选择 `deepseek-v4-pro`（或你自定义映射的模型名）
 
 ## 配置说明
@@ -89,10 +95,8 @@ server {
 
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
-| `DEEPSEEK_API_KEY` | 是 | - | DeepSeek 平台的 API Key |
 | `UPSTREAM` | 否 | `https://api.deepseek.com` | 上游 API 地址 |
 | `LISTEN` | 否 | `:8080` | 代理监听地址 |
-| `PROXY_API_KEY` | 否 | 无 | 对外暴露时的认证密钥，设置后 Cursor 中的 API Key 需填写相同值 |
 | `MAPPED_MODEL` | 否 | `deepseek-v4-pro` | 所有未知模型名的默认映射目标 |
 
 ### 模型映射

@@ -18,25 +18,31 @@ Additionally, Cursor's **Base URL cannot point to a local address** (`127.0.0.1`
 
 ### 1. Get a DeepSeek API Key
 
-Sign up at the [DeepSeek Platform](https://platform.deepseek.com) and create an API key.
+Sign up at the [DeepSeek Platform](https://platform.deepseek.com) and create an API key. This key will be configured in Cursor — the proxy transparently forwards your key to the DeepSeek API.
 
 ### 2. Start the Proxy
 
 **Option A: Run directly**
 
 ```bash
-export DEEPSEEK_API_KEY=sk-your-key
 go run main.go
 ```
 
 **Option B: Docker Compose**
 
 ```bash
-# Create a .env file
-echo "DEEPSEEK_API_KEY=sk-your-key" > .env
-
-# Start
 docker compose up -d --build
+```
+
+**Option C: Pull from Docker Hub**
+
+Image: [houzingm/cursor-deepseek-bridge](https://hub.docker.com/r/houzingm/cursor-deepseek-bridge)
+
+```bash
+docker run -d \
+  --name cursor-deepseek-bridge \
+  -p 8080:8080 \
+  houzingm/cursor-deepseek-bridge:latest
 ```
 
 The proxy listens on `0.0.0.0:8080` by default.
@@ -80,7 +86,7 @@ server {
 In Cursor, set the following:
 
 - **OpenAI Base URL**: `https://your-public-url/v1` (the trailing `/v1` is required)
-- **API Key**: If `PROXY_API_KEY` is set, use that value; otherwise any non-empty string works
+- **API Key**: Your DeepSeek API key from step 1
 - **Model**: Choose `deepseek-v4-pro` (or your custom mapped model name)
 
 ## Configuration Reference
@@ -89,10 +95,8 @@ In Cursor, set the following:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DEEPSEEK_API_KEY` | Yes | - | Your DeepSeek platform API key |
 | `UPSTREAM` | No | `https://api.deepseek.com` | Upstream API endpoint |
 | `LISTEN` | No | `:8080` | Proxy listen address |
-| `PROXY_API_KEY` | No | (none) | Authentication key for public exposure; Cursor API Key must match |
 | `MAPPED_MODEL` | No | `deepseek-v4-pro` | Default target for all unrecognized model names |
 
 ### Model Mapping
