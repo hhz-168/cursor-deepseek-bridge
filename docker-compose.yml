@@ -9,5 +9,9 @@ services:
       MAPPED_MODEL: ${MAPPED_MODEL:-}
       DS_REASONING_EFFORT: ${DS_REASONING_EFFORT:-}
       DS_CACHE_TTL: ${DS_CACHE_TTL:-24h}
+      DS_QUEUE_TTL: ${DS_QUEUE_TTL:-24h}
+      DS_MAX_REQUEST_BODY: ${DS_MAX_REQUEST_BODY:-}
+      DS_DEBUG: ${DS_DEBUG:-}
+      PYTHON: ${PYTHON:-python3}
       MODEL_MAP: ${MODEL_MAP:-}
     restart: unless-stopped

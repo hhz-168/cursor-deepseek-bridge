@@ -6,6 +6,8 @@ A lightweight Go proxy that enables [Cursor](https://cursor.com) to use [DeepSee
 
 > **Highlight: Zero-config Thinking toggle.** Just append `-thinking` to any model name (e.g. `deepseek-v4-pro-thinking`) in Cursor, and the proxy automatically enables reasoning, bridges `reasoning_content` across multi-turn conversations, and caches it transparently. No restarts, no config changes — mix thinking and non-thinking models freely in the same session.
 
+> **New: Image OCR Support.** When Cursor sends an image (e.g. a screenshot), the proxy automatically runs OCR via RapidOCR to extract text and pass it to the DeepSeek API. The AI can then "see" your images.
+
 ## Why This Proxy Exists
 
 [DeepSeek V4](https://platform.deepseek.com) has **Thinking mode enabled by default**, meaning every response includes `reasoning_content` (the model's internal reasoning). In multi-turn conversations, the client must echo the previous turn's `reasoning_content` back to the API — otherwise the request will fail.
@@ -18,15 +20,25 @@ Additionally, Cursor's **Base URL cannot point to a local address** (`127.0.0.1`
 
 ## Quick Start
 
+### Prerequisites
+
+- **Go 1.22+** (for local development)
+- **Python 3.10+** with `rapidocr` (for image OCR; Docker image includes this automatically)
+- **DeepSeek API Key** from [platform.deepseek.com](https://platform.deepseek.com)
+
 ### 1. Get a DeepSeek API Key
 
 Sign up at the [DeepSeek Platform](https://platform.deepseek.com) and create an API key. This key will be configured in Cursor — the proxy transparently forwards your key to the DeepSeek API.
 
 ### 2. Start the Proxy
 
-**Option A: Run directly**
+**Option A: Run directly (local)** — requires Python + rapidocr
 
 ```bash
+# Install OCR dependencies
+pip install rapidocr onnxruntime
+
+# Start the proxy
 go run main.go
 ```
 
@@ -54,11 +66,13 @@ The proxy listens on `0.0.0.0:8080` by default.
 Use a tunneling tool to expose port 8080 as HTTPS:
 
 **ngrok:**
+
 ```bash
 ngrok http 8080
 ```
 
 **Cloudflare Tunnel:**
+
 ```bash
 cloudflared tunnel --url http://localhost:8080
 ```
@@ -92,6 +106,38 @@ In Cursor, set the following:
 - **Model**: Choose `deepseek-v4-pro` or `deepseek-v4-flash` (or your custom mapped model name)
   - Append `-thinking` to the model name (e.g. `deepseek-v4-pro-thinking` / `deepseek-v4-flash-thinking`) to enable reasoning for that conversation. Mix thinking and non-thinking models freely in the same session — no proxy restart needed.
 
+## Image OCR
+
+When you send an image in Cursor, the proxy automatically:
+
+1. Extracts the base64-encoded image from the message content
+2. Runs OCR via [RapidOCR](https://github.com/RapidAI/RapidOCR) (ONNXRuntime backend)
+3. Replaces the `image_url` content with the recognized text (structured with position bounding boxes and confidence scores)
+
+The DeepSeek API then receives the text content, allowing the AI to understand what's in your screenshots.
+
+### Requirements
+
+- **Docker**: OCR is included in the Docker image automatically
+- **Local**: Install `rapidocr` and `onnxruntime`:
+
+  ```bash
+  pip install rapidocr onnxruntime
+  ```
+
+- Specify a custom Python executable path if needed:
+
+  ```bash
+  export PYTHON=/path/to/python
+  ```
+
+### Related Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PYTHON` | `python` | Path to Python executable (for OCR worker subprocess) |
+| `DS_MAX_REQUEST_BODY` | `32m` (32 MiB) | Max HTTP request body size. Images are base64-encoded (~33% larger), so set this higher for hi-res images. Supports `m` (MiB), `g` (GiB), `k` (KiB) suffixes. Min: 1m, Max: 256m |
+
 ## Configuration Reference
 
 ### Environment Variables
@@ -104,6 +150,10 @@ In Cursor, set the following:
 | `DS_REASONING_EFFORT` | No | `high` | Reasoning effort when using `-thinking` suffixed models (`low` / `medium` / `high`) |
 | `DS_CACHE_TTL` | No | `24h` | TTL for reasoning content hash cache (used by `-thinking` suffixed models to bridge `reasoning_content` across turns) |
 | `DS_QUEUE_TTL` | No | `24h` | TTL for per-conversation order queue; idle queues are cleaned after this duration |
+| `DS_MAX_REQUEST_BODY` | No | `32m` | Max HTTP request body size (min: 1m, max: 256m). Increase for large images |
+| `DS_DEBUG` | No | `false` | Enable debug logging (prints request/response bodies; set to `true`) |
+| `PYTHON` | No | `python` | Python executable path for OCR worker subprocess |
+| `MODEL_MAP` | No | (built-in) | Extra custom model mappings (format: `alias=real`, comma-separated) |
 
 ### Model Mapping
 

@@ -6,6 +6,11 @@
 *.dylib
 proxy
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # Environment
 .env
 

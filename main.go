@@ -2,19 +2,26 @@ package main
 
 import (
 	"bytes"
+	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,8 +32,72 @@ import (
 const defaultUpstream = "https://api.deepseek.com"
 
 // 請求與回應 body 大小限制
-const maxRequestBodySize = 1 << 20   // 1 MB
-const maxResponseBodySize = 10 << 20 // 10 MB
+// chat completions 含 base64 圖片時體積大；預設 32 MiB，可用 DS_MAX_REQUEST_BODY 覆寫（如 64m、8388608）
+const defaultMaxChatRequestBody = 32 << 20 // 32 MiB
+const maxResponseBodySize = 10 << 20         // 10 MB
+
+var maxChatRequestBodyBytes int64 = defaultMaxChatRequestBody
+
+// loadMaxChatRequestBodyBytes 讀取環境變數 DS_MAX_REQUEST_BODY。
+// 支援：純數字（bytes）、"32m"/"32mb"/"32mib"（MiB）、"1g"/"1gb"（GiB）、"512k"/"512kb"（KiB）。
+// 無效值則用預設；最小 1 MiB，最大 256 MiB。
+func loadMaxChatRequestBodyBytes() int64 {
+	def := int64(defaultMaxChatRequestBody)
+	v := strings.TrimSpace(os.Getenv("DS_MAX_REQUEST_BODY"))
+	if v == "" {
+		return def
+	}
+	s := strings.ToLower(v)
+	var mult int64 = 1
+	cut := v
+	switch {
+	case strings.HasSuffix(s, "gib"):
+		mult = 1 << 30
+		cut = strings.TrimSpace(v[:len(v)-3])
+	case strings.HasSuffix(s, "gb"):
+		mult = 1 << 30
+		cut = strings.TrimSpace(v[:len(v)-2])
+	case strings.HasSuffix(s, "g") && len(v) > 1:
+		mult = 1 << 30
+		cut = strings.TrimSpace(v[:len(v)-1])
+	case strings.HasSuffix(s, "mib"):
+		mult = 1 << 20
+		cut = strings.TrimSpace(v[:len(v)-3])
+	case strings.HasSuffix(s, "mb"):
+		mult = 1 << 20
+		cut = strings.TrimSpace(v[:len(v)-2])
+	case strings.HasSuffix(s, "m") && len(v) > 1:
+		mult = 1 << 20
+		cut = strings.TrimSpace(v[:len(v)-1])
+	case strings.HasSuffix(s, "kib"):
+		mult = 1 << 10
+		cut = strings.TrimSpace(v[:len(v)-3])
+	case strings.HasSuffix(s, "kb"):
+		mult = 1 << 10
+		cut = strings.TrimSpace(v[:len(v)-2])
+	case strings.HasSuffix(s, "k") && len(v) > 1:
+		mult = 1 << 10
+		cut = strings.TrimSpace(v[:len(v)-1])
+	default:
+		cut = v
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(cut), 10, 64)
+	if err != nil || n <= 0 {
+		log.Printf("[config] invalid DS_MAX_REQUEST_BODY %q, using default %d", v, def)
+		return def
+	}
+	out := n * mult
+	minB := int64(1 << 20)
+	if out < minB {
+		out = minB
+	}
+	maxCap := int64(256 << 20)
+	if out > maxCap {
+		log.Printf("[config] DS_MAX_REQUEST_BODY capped at 256 MiB")
+		out = maxCap
+	}
+	return out
+}
 
 // ctxKeyConv 是 context 中存放 conversation fingerprint 的 key
 type ctxKeyConv struct{}
@@ -367,6 +438,188 @@ func flattenContentField(raw json.RawMessage) string {
 	return b.String()
 }
 
+// sanitizeMessageContent 處理單條消息中的多媒體內容：
+//   - 對 image_url 類型的 content part 執行 OCR（如 Python worker 可用）
+//   - OCR 結果以 text part 插入，包含辨識文字與位置資訊
+//   - 若 OCR 不可用或失敗，插入說明文字替代原始圖片
+//   - 原始 image_url part 被移除
+// 返回處理後的 message JSON 以及是否發生了變更。
+func sanitizeMessageContent(raw json.RawMessage) (json.RawMessage, bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw, false
+	}
+	cbuf, ok := m["content"]
+	if !ok || len(cbuf) == 0 {
+		return raw, false
+	}
+
+	// 先嘗試純字串——無需處理
+	var s string
+	if json.Unmarshal(cbuf, &s) == nil {
+		return raw, false
+	}
+
+	// 嘗試解析為 content parts 陣列
+	var arr []json.RawMessage
+	if json.Unmarshal(cbuf, &arr) != nil {
+		return raw, false
+	}
+
+	type contentPart struct {
+		Type     string          `json:"type"`
+		Text     json.RawMessage `json:"text"`
+		ImageURL json.RawMessage `json:"image_url,omitempty"`
+	}
+
+	var hasImage bool
+	var resultParts []json.RawMessage
+	for _, part := range arr {
+		var cp contentPart
+		if json.Unmarshal(part, &cp) != nil {
+			resultParts = append(resultParts, part)
+			continue
+		}
+		if cp.Type == "text" {
+			resultParts = append(resultParts, part)
+		} else if cp.Type == "image_url" {
+			hasImage = true
+			ocrText := ""
+
+			if globalOcrProcess != nil {
+				// 解析 image_url 中的 url
+				var iu struct {
+					URL string `json:"url"`
+				}
+				if err := json.Unmarshal(cp.ImageURL, &iu); err == nil && iu.URL != "" {
+					// 取得圖片資料
+					imgData, err := resolveImageData(iu.URL)
+					if err != nil {
+						log.Printf("[ocr] resolve image failed: %v (url=%s...)", err, truncateStr(iu.URL, 60))
+					} else {
+						// 執行 OCR
+						ocrText, err = globalOcrProcess.doOcr(imgData)
+						if err != nil {
+							log.Printf("[ocr] OCR failed: %v", err)
+						} else {
+							log.Printf("[ocr] image processed successfully, text length=%d", len(ocrText))
+						}
+					}
+				}
+			} else {
+				log.Printf("[ocr] OCR engine not available")
+			}
+
+			if ocrText == "" {
+				ocrText = "[Image attached - OCR was unable to process this image]"
+			}
+
+			// 將 OCR 結果作為 text part 插入
+			ocrTextRaw, _ := json.Marshal(ocrText)
+			ocrPart := map[string]json.RawMessage{
+				"type": json.RawMessage(`"text"`),
+				"text": ocrTextRaw,
+			}
+			ocrPartRaw, _ := json.Marshal(ocrPart)
+			resultParts = append(resultParts, ocrPartRaw)
+		}
+	}
+
+	if !hasImage {
+		return raw, false
+	}
+
+	// 重組 content
+	if len(resultParts) == 0 {
+		m["content"], _ = json.Marshal("")
+	} else if len(resultParts) == 1 {
+		// 只有一個 text part，簡化為純字串
+		var cp contentPart
+		if json.Unmarshal(resultParts[0], &cp) == nil && cp.Type == "text" {
+			var txt string
+			if json.Unmarshal(cp.Text, &txt) == nil {
+				m["content"], _ = json.Marshal(txt)
+			} else {
+				var obj struct {
+					Value string `json:"value"`
+				}
+				if json.Unmarshal(cp.Text, &obj) == nil {
+					m["content"], _ = json.Marshal(obj.Value)
+				} else {
+					m["content"], _ = json.Marshal(resultParts)
+				}
+			}
+		} else {
+			m["content"], _ = json.Marshal(resultParts)
+		}
+	} else {
+		m["content"], _ = json.Marshal(resultParts)
+	}
+
+	result, err := json.Marshal(m)
+	if err != nil {
+		return raw, false
+	}
+	return result, true
+}
+
+// decodeImageFromDataURI 解析 data:image/... 格式的 base64 URI，返回圖片解碼後的 bytes。
+func decodeImageFromDataURI(uri string) ([]byte, error) {
+	// data:[<mediatype>][;base64],<data>
+	comma := strings.Index(uri, ",")
+	if comma < 0 {
+		return nil, fmt.Errorf("invalid data URI: no comma")
+	}
+	encoded := uri[comma+1:]
+	// 解碼 base64（支援 standard 與 URL-safe）
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		decoded, err = base64.URLEncoding.DecodeString(encoded)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode: %w", err)
+	}
+	return decoded, nil
+}
+
+// resolveImageData 從 data URI 或 HTTP URL 解析圖片 bytes。
+func resolveImageData(uri string) ([]byte, error) {
+	if strings.HasPrefix(uri, "data:") {
+		return decodeImageFromDataURI(uri)
+	}
+	// HTTP(S) URL 下載（僅支援 http/https）
+	if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(uri)
+		if err != nil {
+			return nil, fmt.Errorf("download image: %w", err)
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 20<<20)) // 20MB 限制
+		if err != nil {
+			return nil, fmt.Errorf("read image: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("download image: HTTP %d", resp.StatusCode)
+		}
+		// 檢查是否為有效圖片（讀取 header）
+		_, _, err = image.DecodeConfig(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("invalid image: %w", err)
+		}
+		return data, nil
+	}
+	return nil, fmt.Errorf("unsupported image URI scheme: only data: and http(s): are supported")
+}
+
+// truncateStr 截斷字串到指定長度（用於 log 輸出）
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // assistantPlainTextFromMessageRaw 從完整 message 對象取出 role 與用於緩存的純文本 content。
 func assistantPlainTextFromMessageRaw(rawMsg json.RawMessage) (role, plain string) {
 	var m map[string]json.RawMessage
@@ -567,8 +820,212 @@ func (s *sseTeeReadCloser) Close() error {
 	return err
 }
 
+// OCR 子进程管理
+
+// ocrWorkerResponse 是 Python ocr_worker.py 返回的 JSON 格式
+type ocrWorkerResponse struct {
+	Success bool            `json:"success"`
+	Text    string          `json:"text"`
+	Data    json.RawMessage `json:"data"`
+	Error   string          `json:"error,omitempty"`
+}
+
+// ocrProcess 管理一個持久化的 Python OCR 子行程，支援自動重啟
+type ocrProcess struct {
+	mu     sync.Mutex
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Scanner
+	stderr bytes.Buffer
+	dead   bool // true 表示行程已退出
+}
+
+// startOcrProcess 啟動 ocr_worker.py 子行程。
+// PYTHON 環境變數可指定 python 路徑（預設 "python3"）。
+func startOcrProcess() (*ocrProcess, error) {
+	workerScript := "ocr_worker.py"
+	// 嘗試尋找 worker script 的絕對路徑
+	if _, err := os.Stat(workerScript); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join("..", workerScript)); err == nil {
+			workerScript = filepath.Join("..", workerScript)
+		}
+	}
+
+	pythonCmd := strings.TrimSpace(os.Getenv("PYTHON"))
+	if pythonCmd == "" {
+		// Windows 上優先嘗試 python，linux/macOS 上優先嘗試 python3
+		pythonCmd = "python3"
+	}
+
+	// 先檢查 python 是否可用
+	if _, err := exec.LookPath(pythonCmd); err != nil {
+		// 嘗試其他名稱
+		for _, alt := range []string{"python", "python3", "python3.exe", "python.exe"} {
+			if _, err := exec.LookPath(alt); err == nil {
+				pythonCmd = alt
+				break
+			}
+		}
+	}
+
+	cmd := exec.Command(pythonCmd, "-u", workerScript)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	cmd.Stderr = os.Stderr // 讓 python 的 stderr 直接輸出到 bridge 的 stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start python process: %w", err)
+	}
+
+	p := &ocrProcess{
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: bufio.NewScanner(stdoutPipe),
+	}
+
+	// 啟動後台 goroutine 監控進程退出
+	go func() {
+		err := cmd.Wait()
+		p.mu.Lock()
+		p.dead = true
+		p.mu.Unlock()
+		if err != nil {
+			log.Printf("[ocr] Python OCR worker exited (pid=%d): %v", cmd.Process.Pid, err)
+		} else {
+			log.Printf("[ocr] Python OCR worker exited normally (pid=%d)", cmd.Process.Pid)
+		}
+	}()
+
+	log.Printf("[ocr] Python OCR worker started (pid=%d)", cmd.Process.Pid)
+	return p, nil
+}
+
+// restartOcrProcess 重啟已掛掉的 OCR 子行程
+func restartOcrProcess() error {
+	globalOcrProcess.mu.Lock()
+	defer globalOcrProcess.mu.Unlock()
+
+	// 檢查是否真的需要重啟
+	if globalOcrProcess != nil && !globalOcrProcess.dead {
+		return nil // 還活著，不需要重啟
+	}
+
+	log.Printf("[ocr] restarting Python OCR worker...")
+	p, err := startOcrProcess()
+	if err != nil {
+		return fmt.Errorf("restart failed: %w", err)
+	}
+	globalOcrProcess = p
+	return nil
+}
+
+// doOcr 對圖片 bytes 執行 OCR，返回格式化文字。
+// 線程安全（內部有 mutex 保護）。如果子行程掛掉，自動重啟重試一次。
+func (p *ocrProcess) doOcr(imgData []byte) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("OCR process not available")
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		text, err := p.doOcrOnce(imgData)
+		if err == nil {
+			return text, nil
+		}
+		// 只在第一次失敗時嘗試重啟
+		if attempt == 0 && strings.Contains(err.Error(), "pipe") || strings.Contains(err.Error(), "closed") {
+			log.Printf("[ocr] worker seems dead, restarting...")
+			if restartErr := restartOcrProcess(); restartErr != nil {
+				log.Printf("[ocr] restart failed: %v", restartErr)
+				return "", fmt.Errorf("OCR failed and could not restart: %w", err)
+			}
+			continue
+		}
+		return "", err
+	}
+	return "", fmt.Errorf("OCR failed after retry")
+}
+
+// doOcrOnce 單次 OCR 調用
+func (p *ocrProcess) doOcrOnce(imgData []byte) (string, error) {
+	var localStdin io.WriteCloser
+	var localScanner *bufio.Scanner
+	var isDead bool
+
+	// 先檢查進程狀態
+	p.mu.Lock()
+	isDead = p.dead
+	localStdin = p.stdin
+	localScanner = p.stdout
+	p.mu.Unlock()
+
+	if isDead {
+		return "", fmt.Errorf("ocr worker is dead")
+	}
+
+	// 發送請求（stdin 寫入不需要 mutex，因為只有一個 goroutine 會寫）
+	imgB64 := base64.StdEncoding.EncodeToString(imgData)
+	req := map[string]string{"image": imgB64}
+	reqJSON, _ := json.Marshal(req)
+	reqJSON = append(reqJSON, '\n')
+
+	if _, err := localStdin.Write(reqJSON); err != nil {
+		return "", fmt.Errorf("write to ocr worker: %w", err)
+	}
+
+	// 讀取回應（stdout 讀取需要 mutex 保護，但這裡只有一個調用者）
+	if !localScanner.Scan() {
+		if err := localScanner.Err(); err != nil {
+			return "", fmt.Errorf("read from ocr worker: %w", err)
+		}
+		return "", fmt.Errorf("ocr worker closed unexpectedly")
+	}
+
+	var resp ocrWorkerResponse
+	if err := json.Unmarshal(localScanner.Bytes(), &resp); err != nil {
+		return "", fmt.Errorf("parse ocr response: %w", err)
+	}
+
+	if !resp.Success {
+		return "", fmt.Errorf("ocr error: %s", resp.Error)
+	}
+
+	return resp.Text, nil
+}
+
+// close 關閉子行程。
+func (p *ocrProcess) close() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_ = p.stdin.Close()
+	return nil // Wait 由 goroutine 處理
+}
+
+// 全局 OCR 進程實例，由 main 初始化
+var globalOcrProcess *ocrProcess
+
 func main() {
 	loadDotEnv(".env")
+	maxChatRequestBodyBytes = loadMaxChatRequestBodyBytes()
+	log.Printf("max chat request body: %d bytes (%.1f MiB)", maxChatRequestBodyBytes, float64(maxChatRequestBodyBytes)/float64(1<<20))
+
+	// 初始化 OCR 子行程（可選，需有 Python + pip install rapidocr）
+	var ocrErr error
+	globalOcrProcess, ocrErr = startOcrProcess()
+	if ocrErr != nil {
+		log.Printf("[ocr] OCR worker not started: %v (OCR disabled)", ocrErr)
+		globalOcrProcess = nil
+	} else {
+		defer globalOcrProcess.close()
+	}
 
 	upstreamRaw := strings.TrimSpace(os.Getenv("UPSTREAM"))
 	if upstreamRaw == "" {
@@ -673,8 +1130,8 @@ func main() {
 		withCORS(w, r, func() {
 			path := r.URL.Path
 			if r.Method == http.MethodPost && path == "/v1/chat/completions" {
-				// Fix #6：限制 request body 大小（1MB）
-				r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+				// 含圖片 base64 的請求體很大，見 maxChatRequestBodyBytes / DS_MAX_REQUEST_BODY
+				r.Body = http.MaxBytesReader(w, r.Body, maxChatRequestBodyBytes)
 				if err := rewriteChatCompletionBody(r, modelMap, dsChatOpts, cache, orderQueues); err != nil {
 					log.Printf("rewrite chat body: %v", err)
 					jsonErr(w, http.StatusBadRequest, "invalid request body")
@@ -841,6 +1298,16 @@ func rewriteChatCompletionBody(r *http.Request, modelMap map[string]string, opts
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return err
 	}
+
+	// DS_DEBUG 時輸出原始請求體（截斷避免 log 過長）
+	if os.Getenv("DS_DEBUG") == "true" {
+		debugBody := body
+		if len(debugBody) > 2000 {
+			debugBody = debugBody[:2000]
+		}
+		log.Printf("[debug] original request body: %s", string(debugBody))
+	}
+
 	changed := false
 	var originalModel string
 
@@ -894,6 +1361,29 @@ func rewriteChatCompletionBody(r *http.Request, modelMap map[string]string, opts
 		delete(payload, "reasoning_effort")
 		changed = true
 		log.Printf("[chat] thinking=disabled (forced by proxy)")
+	}
+
+	// 清理 messages 中的多媒體內容（如 image_url），DeepSeek 不支援非 text content parts
+	if rawMsgs, ok := payload["messages"]; ok {
+		var msgs []json.RawMessage
+		if json.Unmarshal(rawMsgs, &msgs) == nil {
+			sanitized := false
+			for i := range msgs {
+				cleaned, changed := sanitizeMessageContent(msgs[i])
+				if changed {
+					msgs[i] = cleaned
+					sanitized = true
+				}
+			}
+			if sanitized {
+				encoded, err := json.Marshal(msgs)
+				if err == nil {
+					payload["messages"] = encoded
+					changed = true
+					log.Printf("[chat] processed image_url content parts via OCR")
+				}
+			}
+		}
 	}
 
 	// 讀取 cookie 中的 conversation ID（不論是否 thinking 模式）
@@ -1034,6 +1524,16 @@ func rewriteChatCompletionBody(r *http.Request, modelMap map[string]string, opts
 	if err != nil {
 		return err
 	}
+
+	// DS_DEBUG 時輸出最終請求體（截斷避免 log 過長）
+	if os.Getenv("DS_DEBUG") == "true" {
+		debugOut := out
+		if len(debugOut) > 2000 {
+			debugOut = debugOut[:2000]
+		}
+		log.Printf("[debug] final request body: %s", string(debugOut))
+	}
+
 	r.Body = io.NopCloser(bytes.NewReader(out))
 	r.ContentLength = int64(len(out))
 	r.Header.Set("Content-Length", strconv.Itoa(len(out)))
