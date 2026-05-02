@@ -5,12 +5,21 @@ RUN go mod download
 COPY main.go .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/proxy .
 
-FROM python:3.12-alpine AS ocr-runtime
-# Install RapidOCR with ONNX Runtime support
+# glibc base: onnxruntime has no usable musllinux wheels for Alpine
+FROM python:3.12-slim-bookworm AS ocr-runtime
 RUN pip install --no-cache-dir rapidocr onnxruntime
 
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgomp1 \
+    libglib2.0-0 \
+    libxcb1 \
+    libx11-6 \
+    libxext6 \
+    libsm6 \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
 # Copy Go proxy binary
 COPY --from=build /out/proxy /proxy
 # Copy Python OCR worker
